@@ -7,7 +7,7 @@ cd $SRC
 
 if [ ! -f .patched ]; then
   echo "applying patches"
-  git am $REPO/patches/*.patch
+  git apply $REPO/patches/*.patch
   touch .patched
 fi
 
