@@ -1,0 +1,985 @@
+From 7cb9e6a06fb20404b329b3b6610eb7c45d97430c Mon Sep 17 00:00:00 2001
+From: Hakii <hakii@necron.dev>
+Date: Thu, 5 Feb 2026 15:58:25 +0700
+Subject: [PATCH 1/3] feature(zubanls): :sparkles: wasm support for zubanls
+
+wasm language server with a subset of capabilities, ty #137 for `local_fs_stub` & `memfs`
+---
+ Cargo.lock                               |  13 ++
+ Cargo.toml                               |   1 +
+ crates/vfs/Cargo.toml                    |   7 +-
+ crates/vfs/src/lib.rs                    |  28 +++-
+ crates/vfs/src/local_fs_stub.rs          |  83 +++++++++
+ crates/vfs/src/memory.rs                 | 205 +++++++++++++++++++++++
+ crates/zuban_python/Cargo.toml           |   2 +
+ crates/zuban_python/src/lib.rs           |  10 +-
+ crates/zuban_python/src/sys_path_stub.rs |  16 ++
+ crates/zubanls/Cargo.toml                |   7 +
+ crates/zubanls/src/lib.rs                |  12 +-
+ crates/zubanls/src/server.rs             | 112 ++++++++++---
+ crates/zubanls/src/wasm.rs               | 176 +++++++++++++++++++
+ scripts/build-wasm.sh                    |  10 ++
+ 14 files changed, 652 insertions(+), 30 deletions(-)
+ create mode 100644 crates/vfs/src/local_fs_stub.rs
+ create mode 100644 crates/vfs/src/memory.rs
+ create mode 100644 crates/zuban_python/src/sys_path_stub.rs
+ create mode 100644 crates/zubanls/src/wasm.rs
+ create mode 100755 scripts/build-wasm.sh
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 460162ff3..43f2a3058 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -268,6 +268,16 @@ dependencies = [
+  "windows-sys 0.59.0",
+ ]
+ 
++[[package]]
++name = "console_error_panic_hook"
++version = "0.1.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
++dependencies = [
++ "cfg-if",
++ "wasm-bindgen",
++]
++
+ [[package]]
+ name = "const-oid"
+ version = "0.9.6"
+@@ -1830,6 +1840,7 @@ dependencies = [
+  "same-file",
+  "tracing",
+  "utils",
++ "wasm-bindgen",
+ ]
+ 
+ [[package]]
+@@ -2210,6 +2221,7 @@ dependencies = [
+  "anyhow",
+  "clap",
+  "config",
++ "console_error_panic_hook",
+  "crossbeam-channel",
+  "fluent-uri",
+  "lazy_static",
+@@ -2228,5 +2240,6 @@ dependencies = [
+  "tracing-subscriber",
+  "urlencoding",
+  "vfs",
++ "wasm-bindgen",
+  "zuban_python",
+ ]
+diff --git a/Cargo.toml b/Cargo.toml
+index c222ba2e8..6906272e0 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -48,6 +48,7 @@ toml_edit = "*"
+ tracing = "*"
+ tracing-subscriber = { version = "*", features = ["time", "local-time"] }
+ tracing-appender = "*"
++wasm-bindgen = "0.2"
+ 
+ # Dev dependencies
+ insta = "*"
+diff --git a/crates/vfs/Cargo.toml b/crates/vfs/Cargo.toml
+index 553094b02..78eb9301b 100644
+--- a/crates/vfs/Cargo.toml
++++ b/crates/vfs/Cargo.toml
+@@ -15,7 +15,12 @@ utils.workspace = true
+ 
+ anyhow.workspace = true
+ tracing.workspace = true
++glob = "*"
++
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ crossbeam-channel.workspace = true
+ notify.workspace = true
+-glob = "*"
+ same-file = "*"
++
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++wasm-bindgen.workspace = true
+diff --git a/crates/vfs/src/lib.rs b/crates/vfs/src/lib.rs
+index dc193690b..ec93b4cfb 100644
+--- a/crates/vfs/src/lib.rs
++++ b/crates/vfs/src/lib.rs
+@@ -1,7 +1,15 @@
+ // Some parts are copied from rust-analyzer
+ 
+ mod glob_abs_path;
++
++#[cfg(not(target_arch = "wasm32"))]
++mod local_fs;
++
++#[cfg(target_arch = "wasm32")]
++#[path = "local_fs_stub.rs"]
+ mod local_fs;
++
++mod memory;
+ mod normalized_path;
+ mod path;
+ mod tree;
+@@ -10,18 +18,34 @@ mod workspaces;
+ 
+ use std::{borrow::Cow, path::Path, sync::Arc};
+ 
+-use crossbeam_channel::Receiver;
+-
+ pub use glob_abs_path::GlobAbsPath;
++
+ pub use local_fs::{LocalFS, SimpleLocalFS};
++
++#[cfg(target_arch = "wasm32")]
++pub use memory::InMemoryFs;
++
+ pub use normalized_path::NormalizedPath;
+ pub use path::AbsPath;
+ pub use tree::{DirOrFile, Directory, DirectoryEntry, Entries, FileEntry, FileIndex, Parent};
+ pub use vfs::{InvalidationResult, PathWithScheme, Vfs, VfsFile, VfsPanicRecovery};
+ pub use workspaces::{Workspace, WorkspaceKind};
+ 
++#[cfg(not(target_arch = "wasm32"))]
++pub use crossbeam_channel::Receiver;
++
++#[cfg(not(target_arch = "wasm32"))]
+ pub type NotifyEvent = notify::Result<notify::Event>;
+ 
++#[cfg(target_arch = "wasm32")]
++pub type NotifyEvent = ();
++
++#[cfg(target_arch = "wasm32")]
++use std::marker::PhantomData;
++
++#[cfg(target_arch = "wasm32")]
++pub type Receiver<T> = PhantomData<T>;
++
+ /// Interface for reading and watching files.                                  
+ pub trait VfsHandler: Sync + Send {
+     /// Load the content of the given file, returning [`None`] if it does not  
+diff --git a/crates/vfs/src/local_fs_stub.rs b/crates/vfs/src/local_fs_stub.rs
+new file mode 100644
+index 000000000..1b21bb740
+--- /dev/null
++++ b/crates/vfs/src/local_fs_stub.rs
+@@ -0,0 +1,83 @@
++use std::{
++    path::{Path, PathBuf},
++    sync::Arc,
++};
++
++use crate::{
++    AbsPath, DirectoryEntry, Entries, NormalizedPath, NotifyEvent, Parent, PathWithScheme,
++    VfsHandler,
++};
++
++pub type SimpleLocalFS = LocalFS;
++
++#[derive(Clone, Default)]
++pub struct LocalFS;
++
++impl LocalFS {
++    pub fn without_watcher() -> Self {
++        Self
++    }
++    pub fn with_watcher<T>(_: T) -> Self {
++        Self
++    }
++    pub fn watch<P: AsRef<Path>>(&self, _: P) {}
++    pub fn current_dir(&self) -> Arc<AbsPath> {
++        self.unchecked_abs_path("")
++    }
++    pub fn normalized_path_from_current_dir(&self, p: &str) -> Arc<NormalizedPath> {
++        self.normalize_rc_path(self.absolute_path(&self.current_dir(), p))
++    }
++}
++
++impl VfsHandler for LocalFS {
++    fn read_and_watch_file(&self, _: &PathWithScheme) -> Option<String> {
++        None
++    }
++    fn notify_receiver(&self) -> Option<&crate::Receiver<NotifyEvent>> {
++        None
++    }
++    fn on_invalidated_in_memory_file(&self, _: PathWithScheme) {}
++    fn read_and_watch_dir(&self, _: &str, _: Parent) -> Entries {
++        Entries::from_vec(vec![])
++    }
++    fn read_and_watch_entry(&self, _: &str, _: Parent, _: &str) -> Option<DirectoryEntry> {
++        None
++    }
++    fn separator(&self) -> char {
++        '/'
++    }
++    fn split_off_folder<'a>(&self, path: &'a str) -> (&'a str, Option<&'a str>) {
++        if path.is_empty() {
++            return (path, None);
++        }
++        if let Some(pos) = path
++            .as_bytes()
++            .iter()
++            .position(|b| *b == b'/' || *b == b'\\')
++        {
++            let (head, tail) = path.split_at(pos);
++            (
++                head,
++                if tail.len() > 1 {
++                    Some(&tail[1..])
++                } else {
++                    None
++                },
++            )
++        } else {
++            (path, None)
++        }
++    }
++    fn join(&self, path: &AbsPath, name: &str) -> Arc<AbsPath> {
++        let p = Path::new(&**path);
++        let joined = if p.as_os_str().is_empty() {
++            PathBuf::from(name)
++        } else {
++            p.join(name)
++        };
++        self.unchecked_abs_path(joined.to_str().unwrap_or(name))
++    }
++    fn is_case_sensitive(&self) -> bool {
++        true
++    }
++}
+diff --git a/crates/vfs/src/memory.rs b/crates/vfs/src/memory.rs
+new file mode 100644
+index 000000000..67c93eb54
+--- /dev/null
++++ b/crates/vfs/src/memory.rs
+@@ -0,0 +1,205 @@
++use std::{
++    collections::{BTreeSet, HashMap},
++    path::{Component, Path, PathBuf},
++    sync::{Arc, RwLock},
++};
++
++use crate::{
++    AbsPath, Directory, DirectoryEntry, Entries, FileEntry, NotifyEvent, Parent, PathWithScheme,
++    Receiver, VfsHandler,
++};
++
++#[derive(Clone, Default)]
++pub struct InMemoryFs {
++    inner: Arc<Inner>,
++}
++
++#[derive(Default)]
++struct Inner {
++    files: RwLock<HashMap<String, String>>,
++    separator: char,
++}
++
++impl InMemoryFs {
++    pub fn new() -> Self {
++        Self {
++            inner: Arc::new(Inner {
++                files: Default::default(),
++                separator: '/',
++            }),
++        }
++    }
++
++    pub fn set_file<S: AsRef<str>, C: Into<String>>(&self, path: S, contents: C) {
++        let key = normalize_key(path.as_ref());
++        self.inner
++            .files
++            .write()
++            .unwrap()
++            .insert(key, contents.into());
++    }
++
++    pub fn remove_file<S: AsRef<str>>(&self, path: S) {
++        let key = normalize_key(path.as_ref());
++        self.inner.files.write().unwrap().remove(&key);
++    }
++
++    pub fn read_file<S: AsRef<str>>(&self, path: S) -> Option<String> {
++        let key = normalize_key(path.as_ref());
++        self.inner.files.read().unwrap().get(&key).cloned()
++    }
++
++    pub fn clear(&self) {
++        self.inner.files.write().unwrap().clear();
++    }
++
++    fn separator(&self) -> char {
++        self.inner.separator
++    }
++
++    fn join_path(&self, base: &AbsPath, name: &str) -> PathBuf {
++        let base_path = Path::new(&**base);
++        if base_path.as_os_str().is_empty() {
++            PathBuf::from(name)
++        } else {
++            base_path.join(name)
++        }
++    }
++}
++
++impl VfsHandler for InMemoryFs {
++    fn read_and_watch_file(&self, path: &PathWithScheme) -> Option<String> {
++        self.read_file(path.path.to_string())
++    }
++
++    fn notify_receiver(&self) -> Option<&Receiver<NotifyEvent>> {
++        None
++    }
++
++    fn on_invalidated_in_memory_file(&self, _path: PathWithScheme) {}
++
++    fn read_and_watch_dir(&self, path: &str, parent: Parent) -> Entries {
++        let base = normalize_key(path);
++        let mut file_children = Vec::new();
++        let mut dir_children: BTreeSet<String> = BTreeSet::new();
++
++        let prefix = if base.is_empty() {
++            String::new()
++        } else {
++            format!("{base}/")
++        };
++
++        for key in self.inner.files.read().unwrap().keys() {
++            if base.is_empty() {
++                if let Some((first, rest)) = key.split_once('/') {
++                    if rest.is_empty() {
++                        file_children.push(first.to_string());
++                    } else {
++                        dir_children.insert(first.to_string());
++                    }
++                } else if !key.is_empty() {
++                    file_children.push(key.clone());
++                }
++            } else if key == &base {
++                file_children.push(key.clone());
++            } else if let Some(stripped) = key.strip_prefix(&prefix) {
++                if let Some((segment, rest)) = stripped.split_once('/') {
++                    if rest.is_empty() {
++                        file_children.push(segment.to_string());
++                    } else {
++                        dir_children.insert(segment.to_string());
++                    }
++                } else if !stripped.is_empty() {
++                    file_children.push(stripped.to_string());
++                }
++            }
++        }
++
++        file_children.sort();
++
++        let mut entries = Vec::with_capacity(dir_children.len() + file_children.len());
++        for dir in dir_children {
++            entries.push(DirectoryEntry::Directory(Directory::new(
++                parent.clone(),
++                dir.into_boxed_str(),
++            )));
++        }
++        for file in file_children {
++            entries.push(DirectoryEntry::File(FileEntry::new(
++                parent.clone(),
++                file.into_boxed_str(),
++            )));
++        }
++        Entries::from_vec(entries)
++    }
++
++    fn read_and_watch_entry(
++        &self,
++        path: &str,
++        parent: Parent,
++        replace_name: &str,
++    ) -> Option<DirectoryEntry> {
++        let key = normalize_key(path);
++        let files = self.inner.files.read().unwrap();
++        if files.contains_key(&key) {
++            return Some(DirectoryEntry::File(FileEntry::new(
++                parent,
++                replace_name.into(),
++            )));
++        }
++        let prefix = format!("{key}/");
++        if files.keys().any(|candidate| candidate.starts_with(&prefix)) {
++            return Some(DirectoryEntry::Directory(Directory::new(
++                parent,
++                replace_name.into(),
++            )));
++        }
++        None
++    }
++
++    fn separator(&self) -> char {
++        self.separator()
++    }
++
++    fn split_off_folder<'a>(&self, path: &'a str) -> (&'a str, Option<&'a str>) {
++        if path.is_empty() {
++            return (path, None);
++        }
++        let bytes = path.as_bytes();
++        if let Some(pos) = bytes.iter().position(|b| *b == b'/' || *b == b'\\') {
++            let (head, tail) = path.split_at(pos);
++            let tail = &tail[1..];
++            (head, if tail.is_empty() { None } else { Some(tail) })
++        } else {
++            (path, None)
++        }
++    }
++
++    fn join(&self, path: &AbsPath, name: &str) -> Arc<AbsPath> {
++        let joined = self.join_path(path, name);
++        let joined = joined.to_str().unwrap_or(name);
++        self.unchecked_abs_path(joined)
++    }
++
++    fn is_case_sensitive(&self) -> bool {
++        true
++    }
++}
++
++fn normalize_key(path: &str) -> String {
++    let mut buf = PathBuf::new();
++    for component in Path::new(path).components() {
++        match component {
++            Component::CurDir => {}
++            Component::ParentDir => {
++                buf.pop();
++            }
++            other => buf.push(other.as_os_str()),
++        }
++    }
++    let normalized = buf
++        .to_str()
++        .map(|s| s.replace('\\', "/"))
++        .unwrap_or_else(|| path.replace('\\', "/"));
++    normalized.trim_matches('/').to_string()
++}
+diff --git a/crates/zuban_python/Cargo.toml b/crates/zuban_python/Cargo.toml
+index 873aef5e2..e009d7aaa 100644
+--- a/crates/zuban_python/Cargo.toml
++++ b/crates/zuban_python/Cargo.toml
+@@ -28,6 +28,8 @@ serde_json.workspace = true
+ tracing.workspace = true
+ lsp-types.workspace = true
+ rayon.workspace = true
++
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ which = "*"
+ 
+ [dev-dependencies]
+diff --git a/crates/zuban_python/src/lib.rs b/crates/zuban_python/src/lib.rs
+index 91ded1e50..4d1b1cbc6 100644
+--- a/crates/zuban_python/src/lib.rs
++++ b/crates/zuban_python/src/lib.rs
+@@ -26,7 +26,13 @@ mod select_files;
+ mod selection_ranges;
+ mod semantic_tokens;
+ mod signatures;
++
++#[cfg(not(target_arch = "wasm32"))]
++mod sys_path;
++#[cfg(target_arch = "wasm32")]
++#[path = "sys_path_stub.rs"]
+ mod sys_path;
++
+ mod type_;
+ mod type_helpers;
+ mod utils;
+@@ -117,8 +123,8 @@ impl Project {
+             })
+     }
+ 
+-    pub fn store_in_memory_file(&mut self, path: PathWithScheme, code: Box<str>) {
+-        self.db.store_in_memory_file(path, code, None);
++    pub fn store_in_memory_file(&mut self, path: PathWithScheme, code: Box<str>) -> FileIndex {
++        self.db.store_in_memory_file(path, code, None)
+     }
+ 
+     pub fn store_file_with_lsp_changes(
+diff --git a/crates/zuban_python/src/sys_path_stub.rs b/crates/zuban_python/src/sys_path_stub.rs
+new file mode 100644
+index 000000000..197aad67f
+--- /dev/null
++++ b/crates/zuban_python/src/sys_path_stub.rs
+@@ -0,0 +1,16 @@
++use std::sync::Arc;
++use vfs::{NormalizedPath, VfsHandler, WorkspaceKind};
++
++pub(crate) fn create_sys_path(
++    handler: &dyn VfsHandler,
++    _settings: &crate::Settings,
++) -> Vec<(WorkspaceKind, Arc<NormalizedPath>)> {
++    vec![(
++        WorkspaceKind::SitePackages,
++        handler.normalize_unchecked_abs_path("/site-packages"),
++    )]
++}
++
++pub(crate) fn typeshed_path_from_executable() -> Arc<NormalizedPath> {
++    unimplemented!("not available in wasm")
++}
+diff --git a/crates/zubanls/Cargo.toml b/crates/zubanls/Cargo.toml
+index 754d44f6b..20e5d8400 100644
+--- a/crates/zubanls/Cargo.toml
++++ b/crates/zubanls/Cargo.toml
+@@ -7,6 +7,9 @@ publish = false
+ homepage.workspace = true
+ authors.workspace = true
+ 
++[lib]
++crate-type = ["lib", "cdylib"]
++
+ [lints]
+ workspace = true
+ 
+@@ -37,5 +40,9 @@ urlencoding = "*"
+ [dev-dependencies]
+ test_utils.workspace = true
+ 
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++wasm-bindgen = "0.2"
++console_error_panic_hook = "0.1"
++
+ [features]
+ zuban_debug = ["zuban_python/zuban_debug"]
+diff --git a/crates/zubanls/src/lib.rs b/crates/zubanls/src/lib.rs
+index a03a16a8a..0e9f16f47 100644
+--- a/crates/zubanls/src/lib.rs
++++ b/crates/zubanls/src/lib.rs
+@@ -1,11 +1,19 @@
+ mod capabilities;
+ mod notebooks;
+-mod notification_handlers;
++#[cfg(not(target_arch = "wasm32"))]
+ mod panic_hooks;
+-mod request_handlers;
+ mod semantic_tokens;
+ mod server;
++#[cfg(target_arch = "wasm32")]
++mod wasm;
++
++mod notification_handlers;
++mod request_handlers;
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ pub use crate::server::{
+     GLOBAL_NOTIFY_EVENT_COUNTER, run_server, run_server_with_custom_connection,
+ };
++
++#[cfg(target_arch = "wasm32")]
++pub use crate::wasm::{ZubanLS, start};
+diff --git a/crates/zubanls/src/server.rs b/crates/zubanls/src/server.rs
+index 75e358f7f..d88d42bc2 100644
+--- a/crates/zubanls/src/server.rs
++++ b/crates/zubanls/src/server.rs
+@@ -1,41 +1,54 @@
+ //! Scheduling, I/O, and API endpoints.
+ 
+-use std::borrow::Cow;
+-use std::cell::RefCell;
+ use std::collections::HashSet;
+-use std::path::{Path, PathBuf};
++use std::path::PathBuf;
+ use std::rc::Rc;
+-use std::sync::atomic::AtomicI64;
+-use std::sync::{Arc, RwLock};
+-
+-use anyhow::bail;
+-use config::ProjectOptions;
+-use crossbeam_channel::{Receiver, Sender, never, select};
+-use fluent_uri::Scheme;
+-use lsp_server::{Connection, ExtractError, Message, Request};
+-use lsp_types::notification::Notification as _;
+-use lsp_types::{TextDocumentPositionParams, Uri};
+-use notify::EventKind;
+-use serde::{Serialize, de::DeserializeOwned};
+-use vfs::{LocalFS, NormalizedPath, NotifyEvent, PathWithScheme, VfsHandler as _};
+-use zuban_python::{PanicRecovery, Project, RunCause};
+-
+-use crate::capabilities::{ClientCapabilities, server_capabilities};
++use std::sync::Arc;
++
++use lsp_types::TextDocumentPositionParams;
++use serde::de::DeserializeOwned;
++use vfs::{NormalizedPath, PathWithScheme};
++use zuban_python::{PanicRecovery, Project};
++
++use crate::capabilities::ClientCapabilities;
+ use crate::notebooks::Notebooks;
+-use crate::notification_handlers::TestPanic;
+-use crate::panic_hooks;
+-use crate::request_handlers::to_uri;
++
++#[cfg(not(target_arch = "wasm32"))]
++use {
++    crate::capabilities::server_capabilities,
++    crate::notification_handlers::TestPanic,
++    crate::panic_hooks,
++    crate::request_handlers::to_uri,
++    anyhow::bail,
++    config::ProjectOptions,
++    crossbeam_channel::{Receiver, Sender, never, select},
++    fluent_uri::Scheme,
++    lsp_server::{Connection, ExtractError, Message, Request},
++    lsp_types::Uri,
++    lsp_types::notification::Notification as _,
++    notify::EventKind,
++    serde::Serialize,
++    std::borrow::Cow,
++    std::cell::RefCell,
++    std::path::Path,
++    std::sync::RwLock,
++    std::sync::atomic::AtomicI64,
++    vfs::{LocalFS, NotifyEvent, VfsHandler as _},
++    zuban_python::RunCause,
++};
+ 
+ // Since we currently don't do garbage collection, we simply delete the project and reindex,
+ // because it's not that expensive after a specific amount of diagnostics.
+ const REINDEX_AFTER_N_DIAGNOSTICS: usize = 1000;
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ pub static GLOBAL_NOTIFY_EVENT_COUNTER: AtomicI64 = AtomicI64::new(0);
+ 
+-fn version() -> &'static str {
++pub(crate) fn version() -> &'static str {
+     env!("CARGO_PKG_VERSION")
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ pub fn run_server_with_custom_connection(
+     connection: Connection,
+     typeshed_path: Option<Arc<NormalizedPath>>,
+@@ -191,6 +204,7 @@ pub fn run_server_with_custom_connection(
+     Ok(())
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ pub fn run_server() -> anyhow::Result<()> {
+     // TODO reenable this in the alpha in some form
+     //licensing::verify_license_in_config_dir()?;
+@@ -203,6 +217,7 @@ pub fn run_server() -> anyhow::Result<()> {
+     })
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ struct NotificationDispatcher<'a, 'sender> {
+     not: Option<lsp_server::Notification>,
+     global_state: &'a mut GlobalState<'sender>,
+@@ -210,19 +225,25 @@ struct NotificationDispatcher<'a, 'sender> {
+ 
+ pub(crate) struct GlobalState<'sender> {
+     paths_that_invalidate_whole_project: HashSet<PathBuf>,
++    #[cfg(not(target_arch = "wasm32"))]
+     sender: &'sender Sender<lsp_server::Message>,
++    // As we don't have sender prop which uses 'sender, it would throw "unused lifetime specifier" without this.
++    #[cfg(target_arch = "wasm32")]
++    _phantom: std::marker::PhantomData<&'sender ()>,
+     roots: Rc<[String]>,
+     typeshed_path: Option<Arc<NormalizedPath>>,
+     pub client_capabilities: ClientCapabilities,
+     project: Option<Project>,
+     panic_recovery: Option<PanicRecovery>,
+     pub sent_diagnostic_count: usize,
++    #[cfg(not(target_arch = "wasm32"))]
+     changed_in_memory_files: Arc<RwLock<Vec<PathWithScheme>>>,
+     pub notebooks: Notebooks,
+     pub last_completion_position: Option<TextDocumentPositionParams>,
+     pub shutdown_requested: bool,
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ impl<'sender> GlobalState<'sender> {
+     fn new(
+         sender: &'sender Sender<lsp_server::Message>,
+@@ -650,6 +671,45 @@ impl<'sender> GlobalState<'sender> {
+     }
+ }
+ 
++#[cfg(target_arch = "wasm32")]
++impl GlobalState<'_> {
++    pub(crate) fn new(
++        client_capabilities: ClientCapabilities,
++        roots: Rc<[String]>,
++        project: Project,
++    ) -> Self {
++        GlobalState {
++            paths_that_invalidate_whole_project: Default::default(),
++            _phantom: std::marker::PhantomData,
++            roots,
++            typeshed_path: None,
++            client_capabilities,
++            project: Some(project),
++            panic_recovery: None,
++            notebooks: Default::default(),
++            sent_diagnostic_count: 0,
++            last_completion_position: None,
++            shutdown_requested: false,
++        }
++    }
++
++    pub(crate) fn project(&mut self) -> &mut Project {
++        self.project.as_mut().expect("project uninitialized")
++    }
++
++    pub(crate) fn uri_to_path(
++        project: &Project,
++        uri: &lsp_types::Uri,
++    ) -> anyhow::Result<PathWithScheme> {
++        let path = uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str());
++        let h = project.vfs_handler();
++        Ok(PathWithScheme::with_file_scheme(
++            h.normalize_unchecked_abs_path(path),
++        ))
++    }
++}
++
++#[cfg(not(target_arch = "wasm32"))]
+ impl<'sender> NotificationDispatcher<'_, 'sender> {
+     fn on_sync_mut<N>(
+         &mut self,
+@@ -705,11 +765,13 @@ impl<'sender> NotificationDispatcher<'_, 'sender> {
+     }
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ struct RequestDispatcher<'a, 'sender> {
+     request: Option<lsp_server::Request>,
+     global_state: &'a mut GlobalState<'sender>,
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ impl<'sender> RequestDispatcher<'_, 'sender> {
+     fn on_sync_mut<R>(
+         &mut self,
+@@ -777,8 +839,10 @@ pub fn from_json<T: DeserializeOwned>(
+         .map_err(|e| anyhow::format_err!("Failed to deserialize {what}: {e}; {json}"))
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ struct Cancelled(); // TODO currently unused
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ fn result_to_response<R>(
+     id: lsp_server::RequestId,
+     result: anyhow::Result<R::Result>,
+@@ -823,6 +887,7 @@ impl std::fmt::Display for LspError {
+ 
+ impl std::error::Error for LspError {}
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ fn patch_path_prefix(path: &Uri) -> anyhow::Result<String> {
+     let (_, path) = unpack_uri(path)?;
+     use std::path::{Component, Prefix};
+@@ -861,6 +926,7 @@ fn patch_path_prefix(path: &Uri) -> anyhow::Result<String> {
+     }
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
+ fn unpack_uri(uri: &lsp_types::Uri) -> anyhow::Result<(&Scheme, Cow<'_, str>)> {
+     let Some(scheme) = uri.scheme() else {
+         bail!("No scheme found in uri {}", uri.as_str())
+diff --git a/crates/zubanls/src/wasm.rs b/crates/zubanls/src/wasm.rs
+new file mode 100644
+index 000000000..9ddc0f597
+--- /dev/null
++++ b/crates/zubanls/src/wasm.rs
+@@ -0,0 +1,176 @@
++use std::rc::Rc;
++use std::str::FromStr;
++
++use config::ProjectOptions;
++use lsp_types::notification::Notification as _;
++use lsp_types::request::Request as _;
++use vfs::{InMemoryFs, VfsHandler as _};
++use wasm_bindgen::prelude::*;
++use zuban_python::{Project, RunCause};
++
++use crate::capabilities::{ClientCapabilities, server_capabilities};
++use crate::server::{GlobalState, from_json, version};
++
++#[wasm_bindgen(start)]
++pub fn start() {
++    console_error_panic_hook::set_once();
++}
++
++#[wasm_bindgen]
++pub struct ZubanLS {
++    state: Option<GlobalState<'static>>,
++    fs: InMemoryFs,
++    mypy_compat: bool,
++}
++
++#[wasm_bindgen]
++impl ZubanLS {
++    #[wasm_bindgen(constructor)]
++    pub fn new(mypy_compat: Option<bool>) -> ZubanLS {
++        ZubanLS {
++            state: None,
++            fs: InMemoryFs::new(),
++            mypy_compat: mypy_compat.unwrap_or_default(),
++        }
++    }
++
++    pub fn set_file(&self, path: &str, contents: &str) {
++        self.fs.set_file(path, contents);
++    }
++
++    pub fn handle_message(&mut self, msg: &str) -> Option<String> {
++        match serde_json::from_str(msg).ok()? {
++            lsp_server::Message::Request(req) => {
++                Some(serde_json::to_string(&self.dispatch_request(req)).unwrap())
++            }
++            lsp_server::Message::Notification(notif) => self
++                .dispatch_notification(notif)
++                .map(|n| serde_json::to_string(&n).unwrap()),
++            lsp_server::Message::Response(_) => None,
++        }
++    }
++}
++
++impl ZubanLS {
++    fn state(&mut self) -> &mut GlobalState<'static> {
++        self.state.as_mut().expect("server uninitialized")
++    }
++
++    fn dispatch_request(&mut self, req: lsp_server::Request) -> lsp_server::Response {
++        use lsp_types::request::*;
++        if req.method == Initialize::METHOD {
++            return self.initialize(req);
++        }
++        macro_rules! dispatch {
++            ($($T:ty => $h:ident),* $(,)?) => {
++                match req.method.as_str() {
++                    $(<$T>::METHOD => {
++                        let params = from_json(<$T>::METHOD, &req.params).unwrap();
++                        serde_json::to_value(self.state().$h(params).unwrap()).unwrap()
++                    })*
++                    _ => unreachable!("unknown method: {}", req.method),
++                }
++            };
++        }
++        lsp_server::Response::new_ok(
++            req.id,
++            dispatch! {
++                Completion => handle_completion,
++                HoverRequest => handle_hover,
++                GotoDefinition => handle_goto_definition,
++                References => handle_references,
++                SignatureHelpRequest => handle_signature_help,
++                Rename => rename,
++                PrepareRenameRequest => prepare_rename,
++                DocumentDiagnosticRequest => handle_document_diagnostics,
++                InlayHintRequest => inlay_hints,
++                DocumentSymbolRequest => document_symbols,
++            },
++        )
++    }
++
++    fn initialize(&mut self, req: lsp_server::Request) -> lsp_server::Response {
++        let params: lsp_types::InitializeParams =
++            from_json(lsp_types::request::Initialize::METHOD, &req.params).unwrap();
++
++        let root = params
++            .workspace_folders
++            .as_ref()
++            .and_then(|ws| ws.first())
++            .map(|w| w.uri.path().to_string())
++            .or_else(|| params.root_uri.as_ref().map(|u| u.path().to_string()))
++            .unwrap_or_else(|| "/".into());
++
++        let mut cfg = if self.mypy_compat {
++            ProjectOptions::mypy_default()
++        } else {
++            config::find_workspace_config(&self.fs, &self.fs.unchecked_abs_path(&root), |_| {})
++                .unwrap_or_default()
++        };
++        cfg.settings.typeshed_path = Some(self.fs.normalize_unchecked_abs_path("/typeshed"));
++
++        let project = Project::new(Box::new(self.fs.clone()), cfg, RunCause::LanguageServer);
++        let caps = ClientCapabilities::new(params.capabilities);
++        self.state = Some(GlobalState::new(caps.clone(), Rc::new([root]), project));
++
++        lsp_server::Response::new_ok(
++            req.id,
++            lsp_types::InitializeResult {
++                capabilities: server_capabilities(&caps),
++                server_info: Some(lsp_types::ServerInfo {
++                    name: "zuban".into(),
++                    version: Some(version().into()),
++                }),
++                offset_encoding: None,
++            },
++        )
++    }
++
++    fn dispatch_notification(
++        &mut self,
++        notif: lsp_server::Notification,
++    ) -> Option<lsp_server::Notification> {
++        use lsp_types::notification::*;
++        macro_rules! dispatch {
++            ($($T:ty => $h:ident),* $(,)?) => {
++                match notif.method.as_str() {
++                    $(<$T>::METHOD => {
++                        let _ = self.state().$h(from_json(<$T>::METHOD, &notif.params).unwrap());
++                    })*
++                    _ => {}
++                }
++            };
++        }
++        dispatch! {
++            DidOpenTextDocument => handle_did_open_text_document,
++            DidChangeTextDocument => handle_did_change_text_document,
++            DidCloseTextDocument => handle_did_close_text_document,
++        }
++        match notif.method.as_str() {
++            DidOpenTextDocument::METHOD | DidChangeTextDocument::METHOD => {
++                let uri = notif.params.get("textDocument")?.get("uri")?.as_str()?;
++                self.publish_diagnostics(uri)
++            }
++            _ => None,
++        }
++    }
++
++    fn publish_diagnostics(&mut self, uri: &str) -> Option<lsp_server::Notification> {
++        let uri = lsp_types::Uri::from_str(uri).ok()?;
++        let state = self.state.as_mut()?;
++        let encoding = state.client_capabilities.negotiated_encoding();
++        let project = state.project();
++        let path = GlobalState::uri_to_path(project, &uri).ok()?;
++        let document = project.document(&path)?;
++        let diagnostics = GlobalState::diagnostics_for_file(document, encoding);
++        Some(lsp_server::Notification {
++            method: lsp_types::notification::PublishDiagnostics::METHOD.into(),
++            params: serde_json::to_value(lsp_types::PublishDiagnosticsParams {
++                uri,
++                diagnostics,
++                version: None,
++            })
++            .ok()?,
++        })
++    }
++}
+diff --git a/scripts/build-wasm.sh b/scripts/build-wasm.sh
+new file mode 100755
+index 000000000..0c284c3b2
+--- /dev/null
++++ b/scripts/build-wasm.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++cd "$(dirname "$0")/.."
++
++RUSTFLAGS="-C target-feature=+atomics,+bulk-memory" \
++  wasm-pack build \
++  --target web \
++  --out-dir ../../target/wasm \
++  crates/zubanls
+-- 
+2.55.0
+

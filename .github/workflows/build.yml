@@ -1,0 +1,89 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      zuban_rev:
+        description: "zubanls/zuban tag/branch/commit to build against"
+        type: string
+        default: master
+      release:
+        description: "Publish release <yyyymmdd-hhmm> UTC. Off = dry run, artifact only, 7 days."
+        type: boolean
+        default: false
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  ROOT: /home/runner/zuban-build
+  ZUBAN_REV: ${{ inputs.zuban_rev }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: cache source + cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ROOT }}/zuban
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: zuban-${{ inputs.zuban_rev }}-${{ hashFiles('scripts/setup.sh') }}
+
+      - name: setup
+        run: bash scripts/setup.sh
+
+      - name: build
+        run: bash scripts/build.sh
+
+      - name: stage release
+        run: |
+          source scripts/common.sh
+          mkdir -p release
+          cp $ROOT/zuban/target/wasm/* release/
+          ZUBAN_COMMIT=$(git -C $ROOT/zuban rev-parse HEAD)
+          PATCH_SUBJECTS=$(git -C $ROOT/zuban log --format='%s' -3 | jq -R . | jq -s .)
+          printf '{"zubanRev":"%s","zubanCommitAfterPatches":"%s","patches":%s}' \
+            "$ZUBAN_REV" "$ZUBAN_COMMIT" "$PATCH_SUBJECTS" > release/versions.json
+          echo "zuban_commit=$ZUBAN_COMMIT" >> "$GITHUB_OUTPUT"
+          ls -la release/
+        id: v
+
+      - name: upload dry run
+        if: '!inputs.release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zuban-wasm-dryrun-${{ github.sha }}
+          path: release/
+          retention-days: 7
+
+      - name: release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOW=$(date -u +%s)
+          TAG=$(date -u -d "@$NOW" +%Y%m%d-%H%M)
+          NOTES=$(printf 'Zuban: %s (%s)\nPatches: wasm support, target_family cleanup, panic_hooks revert\n%s\n' \
+            "$ZUBAN_REV" "${{ steps.v.outputs.zuban_commit }}" "$(date -u -d "@$NOW" +%FT%TZ)")
+          gh release create "$TAG" release/* \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes "$NOTES" \
+          || gh release upload "$TAG" release/* --clobber
