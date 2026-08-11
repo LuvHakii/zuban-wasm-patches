@@ -1,0 +1,597 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 3da623950..235a9f0ff 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -288,6 +288,16 @@ dependencies = [
+  "windows-sys 0.59.0",
+ ]
+ 
++[[package]]
++name = "console_error_panic_hook"
++version = "0.1.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
++dependencies = [
++ "cfg-if",
++ "wasm-bindgen",
++]
++
+ [[package]]
+ name = "const-oid"
+ version = "0.9.6"
+@@ -2517,6 +2527,7 @@ dependencies = [
+  "anyhow",
+  "clap",
+  "config",
++ "console_error_panic_hook",
+  "crossbeam-channel",
+  "lazy_static",
+  "licensing",
+@@ -2534,5 +2545,6 @@ dependencies = [
+  "tracing-subscriber",
+  "urlencoding",
+  "vfs",
++ "wasm-bindgen",
+  "zuban_python",
+ ]
+diff --git a/crates/vfs/src/lib.rs b/crates/vfs/src/lib.rs
+index e4e412d3a..2772f985c 100644
+--- a/crates/vfs/src/lib.rs
++++ b/crates/vfs/src/lib.rs
+@@ -2,6 +2,7 @@
+ 
+ mod glob_abs_path;
+ mod local_fs;
++mod memory;
+ mod normalized_path;
+ mod path;
+ mod tree;
+@@ -14,10 +15,11 @@ use std::{
+     sync::Arc,
+ };
+ 
+-use crossbeam_channel::Receiver;
+-
+ pub use glob_abs_path::GlobAbsPath;
++
+ pub use local_fs::{LocalFS, SimpleLocalFS};
++pub use memory::InMemoryFs;
++
+ pub use normalized_path::NormalizedPath;
+ pub use path::AbsPath;
+ pub use tree::{
+@@ -26,6 +28,8 @@ pub use tree::{
+ pub use vfs::{InvalidationResult, PathWithScheme, Vfs, VfsFile, VfsPanicRecovery};
+ pub use workspaces::{Workspace, WorkspaceKind, Workspaces, WorkspacesBuilder};
+ 
++pub use crossbeam_channel::Receiver;
++
+ pub type NotifyEvent = notify::Result<notify::Event>;
+ 
+ /// Interface for reading and watching files.                                  
+diff --git a/crates/vfs/src/memory.rs b/crates/vfs/src/memory.rs
+new file mode 100644
+index 000000000..ec8525523
+--- /dev/null
++++ b/crates/vfs/src/memory.rs
+@@ -0,0 +1,170 @@
++use std::{
++    collections::{BTreeSet, HashMap},
++    path::{Component, Path, PathBuf},
++    sync::{Arc, RwLock},
++};
++
++use utils::FastHashMap;
++
++use crate::{
++    AbsPath, Directory, DirectoryEntry, Entries, FileEntry, NotifyEvent, Parent, PathWithScheme,
++    Receiver, VfsHandler, Workspace,
++};
++
++#[derive(Clone, Default)]
++pub struct InMemoryFs {
++    inner: Arc<Inner>,
++}
++
++#[derive(Default)]
++struct Inner {
++    files: RwLock<HashMap<String, String>>,
++}
++
++impl InMemoryFs {
++    pub fn new() -> Self {
++        Self {
++            inner: Arc::new(Inner::default()),
++        }
++    }
++
++    pub fn set_file<S: AsRef<str>, C: Into<String>>(&self, path: S, contents: C) {
++        let key = normalize_key(path.as_ref());
++        self.inner.files.write().unwrap().insert(key, contents.into());
++    }
++
++    pub fn read_file<S: AsRef<str>>(&self, path: S) -> Option<String> {
++        let key = normalize_key(path.as_ref());
++        self.inner.files.read().unwrap().get(&key).cloned()
++    }
++
++    fn join_path(&self, base: &AbsPath, name: &str) -> PathBuf {
++        let base_path = Path::new(&**base);
++        if base_path.as_os_str().is_empty() {
++            PathBuf::from(name)
++        } else {
++            base_path.join(name)
++        }
++    }
++}
++
++impl VfsHandler for InMemoryFs {
++    fn read_and_watch_file(&self, path: &PathWithScheme) -> Option<String> {
++        self.read_file(path.path.to_string())
++    }
++
++    fn notify_receiver(&self) -> Option<&Receiver<NotifyEvent>> {
++        None
++    }
++
++    fn on_invalidated_in_memory_file(&self, _path: PathWithScheme) {}
++
++    fn read_and_watch_dir(&self, _: &[Arc<Workspace>], path: &str, parent: Parent) -> Entries {
++        let base = normalize_key(path);
++        let mut file_children = Vec::new();
++        let mut dir_children: BTreeSet<String> = BTreeSet::new();
++
++        let prefix = if base.is_empty() {
++            String::new()
++        } else {
++            format!("{base}/")
++        };
++
++        for key in self.inner.files.read().unwrap().keys() {
++            if base.is_empty() {
++                if let Some((first, rest)) = key.split_once('/') {
++                    if rest.is_empty() {
++                        file_children.push(first.to_string());
++                    } else {
++                        dir_children.insert(first.to_string());
++                    }
++                } else if !key.is_empty() {
++                    file_children.push(key.clone());
++                }
++            } else if key == &base {
++                file_children.push(key.clone());
++            } else if let Some(stripped) = key.strip_prefix(&prefix) {
++                if let Some((segment, rest)) = stripped.split_once('/') {
++                    if rest.is_empty() {
++                        file_children.push(segment.to_string());
++                    } else {
++                        dir_children.insert(segment.to_string());
++                    }
++                } else if !stripped.is_empty() {
++                    file_children.push(stripped.to_string());
++                }
++            }
++        }
++
++        file_children.sort();
++
++        let mut entries = FastHashMap::default();
++
++        for dir in dir_children {
++            let name: Arc<str> = dir.into();
++            entries.insert(
++                name.clone(),
++                DirectoryEntry::Directory(Directory::new(parent.clone(), name)),
++            );
++        }
++
++        for file in file_children {
++            let name: Arc<str> = file.into();
++            entries.insert(
++                name.clone(),
++                DirectoryEntry::File(FileEntry::new(parent.clone(), name)),
++            );
++        }
++
++        Entries::new(entries)
++    }
++
++    fn read_and_watch_entry(
++        &self,
++        _: &[Arc<Workspace>],
++        path: &str,
++        parent: Parent,
++        replace_name: &str,
++    ) -> Option<DirectoryEntry> {
++        let key = normalize_key(path);
++        let files = self.inner.files.read().unwrap();
++        if files.contains_key(&key) {
++            return Some(DirectoryEntry::File(FileEntry::new(
++                parent,
++                replace_name.into(),
++            )));
++        }
++        let prefix = format!("{key}/");
++        if files.keys().any(|candidate| candidate.starts_with(&prefix)) {
++            return Some(DirectoryEntry::Directory(Directory::new(
++                parent,
++                replace_name.into(),
++            )));
++        }
++        None
++    }
++
++    fn join(&self, path: &AbsPath, name: &str) -> Arc<AbsPath> {
++        let joined = self.join_path(path, name);
++        let joined = joined.to_str().unwrap_or(name);
++        self.unchecked_abs_path(joined)
++    }
++}
++
++fn normalize_key(path: &str) -> String {
++    let mut buf = PathBuf::new();
++    for component in Path::new(path).components() {
++        match component {
++            Component::CurDir => {}
++            Component::ParentDir => {
++                buf.pop();
++            }
++            other => buf.push(other.as_os_str()),
++        }
++    }
++    let normalized = buf
++        .to_str()
++        .map(|s| s.replace('\\', "/"))
++        .unwrap_or_else(|| path.replace('\\', "/"));
++    normalized.trim_matches('/').to_string()
++}
+\ No newline at end of file
+diff --git a/crates/zuban_python/Cargo.toml b/crates/zuban_python/Cargo.toml
+index 873aef5e2..2cf984647 100644
+--- a/crates/zuban_python/Cargo.toml
++++ b/crates/zuban_python/Cargo.toml
+@@ -28,6 +28,8 @@ serde_json.workspace = true
+ tracing.workspace = true
+ lsp-types.workspace = true
+ rayon.workspace = true
++
++[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ which = "*"
+ 
+ [dev-dependencies]
+diff --git a/crates/zuban_python/src/lib.rs b/crates/zuban_python/src/lib.rs
+index 357c44ee3..906774782 100644
+--- a/crates/zuban_python/src/lib.rs
++++ b/crates/zuban_python/src/lib.rs
+@@ -31,7 +31,13 @@ mod select_files;
+ mod selection_ranges;
+ mod semantic_tokens;
+ mod signatures;
++
++#[cfg(not(target_family = "wasm"))]
++mod sys_path;
++#[cfg(target_family = "wasm")]
++#[path = "sys_path_stub.rs"]
+ mod sys_path;
++
+ mod type_;
+ mod type_helpers;
+ mod utils;
+diff --git a/crates/zuban_python/src/sys_path_stub.rs b/crates/zuban_python/src/sys_path_stub.rs
+new file mode 100644
+index 000000000..197aad67f
+--- /dev/null
++++ b/crates/zuban_python/src/sys_path_stub.rs
+@@ -0,0 +1,16 @@
++use std::sync::Arc;
++use vfs::{NormalizedPath, VfsHandler, WorkspaceKind};
++
++pub(crate) fn create_sys_path(
++    handler: &dyn VfsHandler,
++    _settings: &crate::Settings,
++) -> Vec<(WorkspaceKind, Arc<NormalizedPath>)> {
++    vec![(
++        WorkspaceKind::SitePackages,
++        handler.normalize_unchecked_abs_path("/site-packages"),
++    )]
++}
++
++pub(crate) fn typeshed_path_from_executable() -> Arc<NormalizedPath> {
++    unimplemented!("not available in wasm")
++}
+diff --git a/crates/zuban_python/tests/mypylike/mypy b/crates/zuban_python/tests/mypylike/mypy
+index 0f31c5cb3..1ecd17bdd 160000
+--- a/crates/zuban_python/tests/mypylike/mypy
++++ b/crates/zuban_python/tests/mypylike/mypy
+@@ -1 +1 @@
+-Subproject commit 0f31c5cb3733a59433f365e4a87f0c0320116919
++Subproject commit 1ecd17bdd27bef871e8e4a599edc64a5f767bfd1
+diff --git a/crates/zubanls/Cargo.toml b/crates/zubanls/Cargo.toml
+index 5132c526a..b7f3c11a3 100644
+--- a/crates/zubanls/Cargo.toml
++++ b/crates/zubanls/Cargo.toml
+@@ -7,6 +7,9 @@ publish = false
+ homepage.workspace = true
+ authors.workspace = true
+ 
++[lib]
++crate-type = ["lib", "cdylib"]
++
+ [lints]
+ workspace = true
+ 
+@@ -36,5 +39,9 @@ urlencoding = "*"
+ [dev-dependencies]
+ test_utils.workspace = true
+ 
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++wasm-bindgen = "0.2"
++console_error_panic_hook = "0.1"
++
+ [features]
+ zuban_debug = ["zuban_python/zuban_debug"]
+diff --git a/crates/zubanls/src/lib.rs b/crates/zubanls/src/lib.rs
+index 3c8ecac4c..f258ca8d6 100644
+--- a/crates/zubanls/src/lib.rs
++++ b/crates/zubanls/src/lib.rs
+@@ -3,16 +3,22 @@ mod client_config;
+ mod custom;
+ mod notebooks;
+ mod notification_handlers;
++#[cfg(not(target_family = "wasm"))]
+ mod panic_hooks;
+ mod request_handlers;
+ mod semantic_tokens;
+ mod server;
++#[cfg(target_family = "wasm")]
++mod wasm;
+ 
+ pub use crate::custom::{DisplayResult, DisplayStatusRequest};
+ pub use crate::server::{
+     GLOBAL_NOTIFY_EVENT_COUNTER, run_server, run_server_with_custom_connection,
+ };
+ 
++#[cfg(target_family = "wasm")]
++pub use crate::wasm::{ZubanLS, start};
++
+ use clap::Parser;
+ 
+ #[derive(Parser, Clone, Default, Debug)]
+diff --git a/crates/zubanls/src/server.rs b/crates/zubanls/src/server.rs
+index 48d5b9044..bfae993b0 100644
+--- a/crates/zubanls/src/server.rs
++++ b/crates/zubanls/src/server.rs
+@@ -23,7 +23,9 @@ use crate::client_config::{ClientConfig, TypeCheckingMode};
+ use crate::notebooks::Notebooks;
+ use crate::notification_handlers::TestPanic;
+ use crate::request_handlers::to_uri;
+-use crate::{Cli, custom, panic_hooks};
++#[cfg(not(target_family = "wasm"))]
++use crate::panic_hooks;
++use crate::{Cli, custom};
+ 
+ // Since we currently don't do garbage collection, we simply delete the project and reindex,
+ // because it's not that expensive after a specific amount of diagnostics.
+@@ -31,7 +33,7 @@ const REINDEX_AFTER_N_DIAGNOSTICS: usize = 1000;
+ 
+ pub static GLOBAL_NOTIFY_EVENT_COUNTER: AtomicI64 = AtomicI64::new(0);
+ 
+-fn version() -> &'static str {
++pub(crate) fn version() -> &'static str {
+     env!("CARGO_PKG_VERSION")
+ }
+ 
+@@ -140,6 +142,7 @@ pub fn run_server_with_custom_connection(
+     });
+ 
+     // On panic, notify the client.
++    #[cfg(not(target_family = "wasm"))]
+     let _hook = panic_hooks::enter(Box::new(move |panic_info| {
+         use std::io::Write;
+ 
+@@ -227,7 +230,7 @@ pub(crate) struct GlobalState<'sender> {
+     roots: Rc<[String]>,
+     typeshed_path: Option<Arc<NormalizedPath>>,
+     pub client_capabilities: ClientCapabilities,
+-    project: Option<Project>,
++    pub(crate) project: Option<Project>,
+     panic_recovery: Option<PanicRecovery>,
+     pub sent_diagnostic_count: usize,
+     changed_in_memory_files: Arc<RwLock<Vec<PathWithScheme>>>,
+@@ -237,7 +240,7 @@ pub(crate) struct GlobalState<'sender> {
+ }
+ 
+ impl<'sender> GlobalState<'sender> {
+-    fn new(
++    pub(crate) fn new(
+         client_config: ClientConfig,
+         sender: &'sender Sender<lsp_server::Message>,
+         client_capabilities: ClientCapabilities,
+@@ -493,7 +496,7 @@ impl<'sender> GlobalState<'sender> {
+         .finish();
+     }
+ 
+-    fn on_lsp_message_and_return_on_shutdown(&mut self, msg: Message) -> bool {
++    pub(crate) fn on_lsp_message_and_return_on_shutdown(&mut self, msg: Message) -> bool {
+         // It is a bit questionable that we use AssertUnwindSafe here. But the data is mostly in
+         // self.project and will be cleaned up if it panics.
+         tracing::trace!("New LSP message: {msg:?}");
+@@ -634,7 +637,7 @@ impl<'sender> GlobalState<'sender> {
+         tracing::error!("unhandled request: {:?}", response);
+     }
+ 
+-    fn publish_diagnostics_if_necessary(&mut self) {
++    pub(crate) fn publish_diagnostics_if_necessary(&mut self) {
+         let encoding = self.client_capabilities.negotiated_encoding();
+         let files = std::mem::take(&mut *self.changed_in_memory_files.as_ref().write().unwrap());
+         if !files.is_empty() {
+@@ -877,7 +880,7 @@ impl std::fmt::Display for LspError {
+ 
+ impl std::error::Error for LspError {}
+ 
+-fn patch_path_prefix(path: &Url) -> anyhow::Result<String> {
++pub(crate) fn patch_path_prefix(path: &Url) -> anyhow::Result<String> {
+     let (_, path) = unpack_uri(path)?;
+     use std::path::{Component, Prefix};
+     if cfg!(windows) {
+diff --git a/crates/zubanls/src/wasm.rs b/crates/zubanls/src/wasm.rs
+new file mode 100644
+index 000000000..998eb8990
+--- /dev/null
++++ b/crates/zubanls/src/wasm.rs
+@@ -0,0 +1,138 @@
++use std::rc::Rc;
++
++use config::{Mode, ProjectOptions};
++use lsp_server::{Message, Response};
++use lsp_types::request::{Initialize, Request as _};
++use lsp_types::InitializeParams;
++use vfs::{InMemoryFs, VfsHandler as _};
++use wasm_bindgen::prelude::*;
++use zuban_python::{Project, RunCause};
++
++use crate::capabilities::{ClientCapabilities, server_capabilities};
++use crate::client_config::ClientConfig;
++use crate::server::{GlobalState, from_json, patch_path_prefix, version};
++
++#[wasm_bindgen(start)]
++pub fn start() {
++    console_error_panic_hook::set_once();
++}
++
++#[wasm_bindgen]
++pub struct ZubanLS {
++    state: Option<GlobalState<'static>>,
++    fs: InMemoryFs,
++    mypy_compat: bool,
++    sender: &'static crossbeam_channel::Sender<lsp_server::Message>,
++    output: crossbeam_channel::Receiver<lsp_server::Message>,
++}
++
++#[wasm_bindgen]
++impl ZubanLS {
++    #[wasm_bindgen(constructor)]
++    pub fn new(mypy_compat: Option<bool>) -> ZubanLS {
++        let (sender, receiver) = crossbeam_channel::unbounded();
++        ZubanLS {
++            state: None,
++            fs: InMemoryFs::new(),
++            mypy_compat: mypy_compat.unwrap_or_default(),
++            sender: Box::leak(Box::new(sender)),
++            output: receiver,
++        }
++    }
++
++    pub fn set_file(&self, path: &str, contents: &str) {
++        self.fs.set_file(path, contents);
++    }
++
++    pub fn handle_message(&mut self, msg: &str) -> Vec<String> {
++        let Ok(msg) = serde_json::from_str(msg) else {
++            return Vec::new();
++        };
++        match msg {
++            Message::Request(req) if req.method == Initialize::METHOD => {
++                self.initialize(req);
++            }
++            msg @ (Message::Request(_) | Message::Notification(_)) => {
++                let state = match &mut self.state {
++                    Some(state) => state,
++                    None => return Vec::new(),
++                };
++                state.on_lsp_message_and_return_on_shutdown(msg);
++                state.publish_diagnostics_if_necessary();
++            }
++            Message::Response(_) => {}
++        }
++        self.drain_output()
++    }
++}
++
++impl ZubanLS {
++    fn initialize(&mut self, req: lsp_server::Request) {
++        let params: InitializeParams = from_json(Initialize::METHOD, &req.params).unwrap();
++
++        #[expect(deprecated)]
++        let workspace_roots = params
++            .workspace_folders
++            .as_ref()
++            .and_then(|ws| ws.first())
++            .map(|w| &w.uri)
++            .or(params.root_uri.as_ref())
++            .map(|uri| Rc::new([patch_path_prefix(uri).unwrap()]))
++            .unwrap_or_else(|| Rc::new(["/".to_string()]));
++
++        let client_config: ClientConfig = params
++            .initialization_options
++            .as_ref()
++            .and_then(|options| serde_json::from_value(options.clone()).ok())
++            .unwrap_or_default();
++
++        let mode = if self.mypy_compat {
++            Mode::Mypy
++        } else {
++            Mode::Default
++        };
++        let mut options = ProjectOptions::default_for_mode(mode);
++        options.settings.typeshed_path = Some(self.fs.normalize_unchecked_abs_path("/typeshed"));
++        for root in workspace_roots.iter() {
++            options
++                .settings
++                .mypy_path
++                .push(self.fs.normalize_unchecked_abs_path(root));
++        }
++        let project = Project::new(Box::new(self.fs.clone()), options, RunCause::LanguageServer);
++
++        let caps = ClientCapabilities::new(params.capabilities);
++        let capabilities = server_capabilities(&caps, &client_config);
++
++        self.state = Some(GlobalState::new(
++            client_config,
++            self.sender,
++            caps,
++            workspace_roots,
++            None,
++        ));
++        self.state.as_mut().unwrap().project = Some(project);
++
++        let result = lsp_types::InitializeResult {
++            capabilities,
++            server_info: Some(lsp_types::ServerInfo {
++                name: "zuban".into(),
++                version: Some(version().into()),
++            }),
++            offset_encoding: None,
++        };
++        let _ = self
++            .sender
++            .send(Message::Response(Response::new_ok(
++                req.id,
++                serde_json::to_value(result).unwrap(),
++            )));
++    }
++
++    fn drain_output(&self) -> Vec<String> {
++        self.output
++            .try_iter()
++            .map(|msg| serde_json::to_string(&msg).unwrap())
++            .collect()
++    }
++}
+\ No newline at end of file
+diff --git a/scripts/build-wasm.sh b/scripts/build-wasm.sh
+new file mode 100755
+index 000000000..0c284c3b2
+--- /dev/null
++++ b/scripts/build-wasm.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++cd "$(dirname "$0")/.."
++
++RUSTFLAGS="-C target-feature=+atomics,+bulk-memory" \
++  wasm-pack build \
++  --target web \
++  --out-dir ../../target/wasm \
++  crates/zubanls

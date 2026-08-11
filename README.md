@@ -5,7 +5,7 @@ Extends [zuban](https://github.com/zubanls/zuban) with WASM support.
 ## Layout
 
 ```
-patches/    3 patches: wasm support, target_family cleanup, panic_hooks revert
+patches/    net diff vs upstream/master: wasm support for zubanls
 scripts/    common.sh (config), setup.sh (clone), build.sh (patch + build)
 ```
 

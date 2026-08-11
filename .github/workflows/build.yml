@@ -58,9 +58,9 @@ jobs:
           mkdir -p release
           cp $ROOT/zuban/target/wasm/* release/
           ZUBAN_COMMIT=$(git -C $ROOT/zuban rev-parse HEAD)
-          PATCH_SUBJECTS=$(git -C $ROOT/zuban log --format='%s' -3 | jq -R . | jq -s .)
-          printf '{"zubanRev":"%s","zubanCommitAfterPatches":"%s","patches":%s}' \
-            "$ZUBAN_REV" "$ZUBAN_COMMIT" "$PATCH_SUBJECTS" > release/versions.json
+          PATCHES=$(basename -a $REPO/patches/*.patch | jq -R . | jq -s .)
+          printf '{"zubanRev":"%s","zubanBaseCommit":"%s","patches":%s}' \
+            "$ZUBAN_REV" "$ZUBAN_COMMIT" "$PATCHES" > release/versions.json
           echo "zuban_commit=$ZUBAN_COMMIT" >> "$GITHUB_OUTPUT"
           ls -la release/
         id: v
@@ -80,7 +80,7 @@ jobs:
         run: |
           NOW=$(date -u +%s)
           TAG=$(date -u -d "@$NOW" +%Y%m%d-%H%M)
-          NOTES=$(printf 'Zuban: %s (%s)\nPatches: wasm support, target_family cleanup, panic_hooks revert\n%s\n' \
+          NOTES=$(printf 'Zuban: %s (%s)\nPatch: wasm support for zubanls\n%s\n' \
             "$ZUBAN_REV" "${{ steps.v.outputs.zuban_commit }}" "$(date -u -d "@$NOW" +%FT%TZ)")
           gh release create "$TAG" release/* \
             --target "$GITHUB_SHA" \
