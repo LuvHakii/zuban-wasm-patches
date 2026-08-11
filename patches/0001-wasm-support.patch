@@ -34,6 +34,26 @@ index 3da623950..235a9f0ff 100644
 + "wasm-bindgen",
   "zuban_python",
  ]
+diff --git a/Cargo.toml b/Cargo.toml
+index b93bf5f29..7126f4a2e 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -65,9 +65,12 @@ pre-release-hook = [
+ ]
+ 
+ [profile.release]
+-# Had debug = "line-tables-only" here, which is probably enough, but struggled
+-# with test unwinding which has works on debug = <any number>. Use this for now
+-debug = 1
++debug = false
++strip = true
++opt-level = "z"
++lto = true
++codegen-units = 1
++panic = "abort"
+ 
+ [workspace.lints.rust]
+ explicit_outlives_requirements = "warn"
 diff --git a/crates/vfs/src/lib.rs b/crates/vfs/src/lib.rs
 index e4e412d3a..2772f985c 100644
 --- a/crates/vfs/src/lib.rs
