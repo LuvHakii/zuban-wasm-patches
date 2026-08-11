@@ -327,7 +327,7 @@ index 0f31c5cb3..1ecd17bdd 160000
 -Subproject commit 0f31c5cb3733a59433f365e4a87f0c0320116919
 +Subproject commit 1ecd17bdd27bef871e8e4a599edc64a5f767bfd1
 diff --git a/crates/zubanls/Cargo.toml b/crates/zubanls/Cargo.toml
-index 5132c526a..4a242145e 100644
+index 5132c526a..0bf4f6ad4 100644
 --- a/crates/zubanls/Cargo.toml
 +++ b/crates/zubanls/Cargo.toml
 @@ -7,6 +7,9 @@ publish = false
@@ -352,7 +352,7 @@ index 5132c526a..4a242145e 100644
  zuban_debug = ["zuban_python/zuban_debug"]
 +
 +[package.metadata.wasm-pack.profile.release]
-+wasm-opt = ["-O", "--enable-threads", "--enable-bulk-memory"]
++wasm-opt = ["-O", "--all-features"]
 diff --git a/crates/zubanls/src/lib.rs b/crates/zubanls/src/lib.rs
 index 3c8ecac4c..f258ca8d6 100644
 --- a/crates/zubanls/src/lib.rs
