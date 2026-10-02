@@ -1,0 +1,141 @@
+diff --git a/crates/zuban/src/bin/zuban.rs b/crates/zuban/src/bin/zuban.rs
+index 780e0ee..ee2f3ba 100644
+--- a/crates/zuban/src/bin/zuban.rs
++++ b/crates/zuban/src/bin/zuban.rs
+@@ -64,15 +64,5 @@ fn run_server(server_config: zubanls::Cli) -> anyhow::Result<()> {
+ pub(crate) fn event_loop_thread(
+     func: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+ ) -> anyhow::Result<()> {
+-    // Override OS defaults to avoid stack overflows on platforms with low stack size defaults.
+-    const MAIN_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
+-    const MAIN_THREAD_NAME: &str = "zubanls:main";
+-    let handle = std::thread::Builder::new()
+-        .name(MAIN_THREAD_NAME.into())
+-        .stack_size(MAIN_THREAD_STACK_SIZE)
+-        .spawn(func)?;
+-
+-    handle
+-        .join()
+-        .map_err(|e| anyhow::anyhow!("Error while joining the thread: {e:?}"))?
++    func()
+ }
+diff --git a/crates/zubanls/src/server.rs b/crates/zubanls/src/server.rs
+index 48d5b90..d4ee105 100644
+--- a/crates/zubanls/src/server.rs
++++ b/crates/zubanls/src/server.rs
+@@ -122,12 +122,11 @@ pub fn run_server_with_custom_connection(
+ 
+     let initialize_result = serde_json::to_value(initialize_result).unwrap();
+ 
+-    if let Err(e) = connection.initialize_finish(initialize_id, initialize_result) {
+-        if e.channel_is_disconnected() {
+-            cleanup()?;
+-        }
+-        return Err(e.into());
+-    }
++    connection
++        .sender
++        .send(lsp_server::Response::new_ok(initialize_id, initialize_result).into())?;
++    pump()?;
++    connection.receiver.recv()?;
+ 
+     thread_local! {
+         static LOCAL_SENDER: RefCell<Option<Sender<Message>>> = const { RefCell::new(None) };
+@@ -207,11 +206,36 @@ pub fn run_server(cli_options: Cli) -> anyhow::Result<()> {
+     // TODO reenable this in the alpha in some form
+     //licensing::verify_license_in_config_dir()?;
+ 
+-    let (connection, _io_threads) = Connection::stdio();
+-    run_server_with_custom_connection(cli_options, connection, None, || {
+-        // This used to be a join, but that seems to never join in VSCode, no idea why.
+-        //Ok(io_threads.join()?)
+-        Ok(())
++    let (connection, client) = Connection::memory();
++    STDIO.set(Some(client));
++    pump()?;
++    run_server_with_custom_connection(cli_options, connection, None, flush)
++}
++
++thread_local!(static STDIO: RefCell<Option<Connection>> = const { RefCell::new(None) });
++
++fn flush() -> anyhow::Result<()> {
++    use std::io::Write as _;
++    STDIO.with_borrow(|client| {
++        let mut out = std::io::stdout().lock();
++        for msg in client.iter().flat_map(|c| c.receiver.try_iter()) {
++            serde_json::to_writer(&mut out, &msg)?;
++            out.write_all(b"\n")?;
++        }
++        Ok(out.flush()?)
++    })
++}
++
++fn pump() -> anyhow::Result<()> {
++    flush()?;
++    STDIO.with_borrow(|client| {
++        let Some(client) = client else { return Ok(()) };
++        let mut line = String::new();
++        let msg = match std::io::stdin().read_line(&mut line)? {
++            0 => Message::Notification(lsp_server::Notification::new("exit".into(), ())),
++            _ => serde_json::from_str(&line)?,
++        };
++        Ok(client.sender.send(msg)?)
+     })
+ }
+ 
+@@ -265,6 +289,7 @@ impl<'sender> GlobalState<'sender> {
+         loop {
+             // Make sure the project is basically loaded
+             self.project();
++            pump()?;
+ 
+             select! {
+                 recv(receiver) -> msg => {
+@@ -295,17 +320,7 @@ impl<'sender> GlobalState<'sender> {
+         if let Some(p) = project {
+             p
+         } else {
+-            let new_changed_files = self.changed_in_memory_files.clone();
+-            let should_push = self.client_capabilities.should_push_diagnostics();
+-            let vfs_handler = LocalFS::with_watcher(move |path| {
+-                if should_push {
+-                    let mut changed_files = new_changed_files.as_ref().write().unwrap();
+-                    // This is currently a not a set, because the order matters
+-                    if !changed_files.contains(&path) {
+-                        changed_files.push(path)
+-                    }
+-                }
+-            });
++            let vfs_handler = LocalFS::without_watcher();
+             let first_root = self
+                 .roots
+                 .first()
+@@ -444,7 +459,7 @@ impl<'sender> GlobalState<'sender> {
+         .on_sync_mut::<DidChangeNotebookDocument>(GlobalState::handle_did_change_notebook)
+         .on_sync_mut::<DidCloseNotebookDocument>(GlobalState::handle_did_close_notebook)
+         //.on_sync_mut::<DidChangeWorkspaceFolders>(GlobalState::handle_did_change_workspace_folders)
+-        //.on_sync_mut::<notifs::DidChangeWatchedFiles>(GlobalState::handle_did_change_watched_files)
++        .on_sync_mut::<lsp_types::notification::DidChangeWatchedFiles>(GlobalState::handle_did_change_watched_files)
+         .on_sync_mut::<TestPanic>(GlobalState::test_panic)
+         .finish();
+     }
+@@ -545,6 +560,19 @@ impl<'sender> GlobalState<'sender> {
+         }
+     }
+ 
++    fn handle_did_change_watched_files(
++        &mut self,
++        params: lsp_types::DidChangeWatchedFilesParams,
++    ) -> anyhow::Result<()> {
++        for change in params.changes {
++            let path = patch_path_prefix(&change.uri)?;
++            let project = self.project();
++            let path = project.vfs_handler().unchecked_abs_path(&path);
++            project.invalidate_path(&path);
++        }
++        Ok(())
++    }
++
+     fn on_notify_events(&mut self, event: NotifyEvent) {
+         self.on_notify_event(event);
+         // Check all events in the Notify queue
