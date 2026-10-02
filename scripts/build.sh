@@ -13,15 +13,13 @@ if [ ! -f .patched ]; then
   touch .patched
 fi
 
-export CARGO_PROFILE_RELEASE_DEBUG=false CARGO_PROFILE_RELEASE_STRIP=true CARGO_PROFILE_RELEASE_OPT_LEVEL=z \
+export CARGO_PROFILE_RELEASE_DEBUG=false CARGO_PROFILE_RELEASE_STRIP=debuginfo CARGO_PROFILE_RELEASE_OPT_LEVEL=z \
   CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_PANIC=abort \
   RUSTFLAGS="-C link-arg=-zstack-size=2097152"
 
 echo "building wasm"
 cargo build --release --target wasm32-wasip1 -p zuban --bin zuban
 mkdir -p target/wasm
-wasm-opt -O --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
-  --enable-mutable-globals --enable-multivalue --enable-reference-types \
-  target/wasm32-wasip1/release/zuban.wasm -o target/wasm/zuban.wasm
+wasm-opt -O --strip-debug target/wasm32-wasip1/release/zuban.wasm -o target/wasm/zuban.wasm
 
 echo "BUILD DONE"
