@@ -1,39 +1,3 @@
-diff --git a/Cargo.lock b/Cargo.lock
-index 60cd130..cf263db 100644
---- a/Cargo.lock
-+++ b/Cargo.lock
-@@ -289,6 +289,16 @@ dependencies = [
-  "windows-sys 0.59.0",
- ]
- 
-+[[package]]
-+name = "console_error_panic_hook"
-+version = "0.1.7"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
-+dependencies = [
-+ "cfg-if",
-+ "wasm-bindgen",
-+]
-+
- [[package]]
- name = "const-oid"
- version = "0.9.6"
-@@ -2518,6 +2528,7 @@ dependencies = [
-  "anyhow",
-  "clap",
-  "config",
-+ "console_error_panic_hook",
-  "crossbeam-channel",
-  "lazy_static",
-  "licensing",
-@@ -2535,5 +2546,6 @@ dependencies = [
-  "tracing-subscriber",
-  "urlencoding",
-  "vfs",
-+ "wasm-bindgen",
-  "zuban_python",
- ]
 diff --git a/crates/vfs/src/lib.rs b/crates/vfs/src/lib.rs
 index e4e412d..603badf 100644
 --- a/crates/vfs/src/lib.rs
@@ -191,36 +155,29 @@ index 0000000..81a928c
 +    }
 +}
 diff --git a/crates/zuban_python/Cargo.toml b/crates/zuban_python/Cargo.toml
-index 873aef5..2cf9846 100644
+index 873aef5..0eb7af5 100644
 --- a/crates/zuban_python/Cargo.toml
 +++ b/crates/zuban_python/Cargo.toml
-@@ -28,6 +28,8 @@ serde_json.workspace = true
+@@ -28,7 +28,6 @@ serde_json.workspace = true
  tracing.workspace = true
  lsp-types.workspace = true
  rayon.workspace = true
-+
-+[target.'cfg(not(target_family = "wasm"))'.dependencies]
- which = "*"
+-which = "*"
  
  [dev-dependencies]
+ clap.workspace = true
 diff --git a/crates/zuban_python/src/lib.rs b/crates/zuban_python/src/lib.rs
-index d5413a9..90b96a2 100644
+index d5413a9..e65ff12 100644
 --- a/crates/zuban_python/src/lib.rs
 +++ b/crates/zuban_python/src/lib.rs
-@@ -31,7 +31,13 @@ mod select_files;
+@@ -31,6 +31,7 @@ mod select_files;
  mod selection_ranges;
  mod semantic_tokens;
  mod signatures;
-+
-+#[cfg(not(target_family = "wasm"))]
-+mod sys_path;
-+#[cfg(target_family = "wasm")]
 +#[path = "sys_path_stub.rs"]
  mod sys_path;
-+
  mod type_;
  mod type_helpers;
- mod utils;
 diff --git a/crates/zuban_python/src/sys_path_stub.rs b/crates/zuban_python/src/sys_path_stub.rs
 new file mode 100644
 index 0000000..197aad6
@@ -244,7 +201,7 @@ index 0000000..197aad6
 +    unimplemented!("not available in wasm")
 +}
 diff --git a/crates/zubanls/Cargo.toml b/crates/zubanls/Cargo.toml
-index 5132c52..0bf4f6a 100644
+index 5132c52..d03a2f2 100644
 --- a/crates/zubanls/Cargo.toml
 +++ b/crates/zubanls/Cargo.toml
 @@ -7,6 +7,9 @@ publish = false
@@ -257,41 +214,41 @@ index 5132c52..0bf4f6a 100644
  [lints]
  workspace = true
  
-@@ -36,5 +39,12 @@ urlencoding = "*"
+@@ -32,9 +35,14 @@ tracing-subscriber.workspace = true
+ shellexpand.workspace = true
+ serial_test = "*"
+ urlencoding = "*"
++wasm-bindgen = "0.2"
++console_error_panic_hook = "0.1"
+ 
  [dev-dependencies]
  test_utils.workspace = true
  
-+[target.'cfg(target_arch = "wasm32")'.dependencies]
-+wasm-bindgen = "0.2"
-+console_error_panic_hook = "0.1"
-+
  [features]
  zuban_debug = ["zuban_python/zuban_debug"]
 +
 +[package.metadata.wasm-pack.profile.release]
 +wasm-opt = ["-O", "--all-features"]
 diff --git a/crates/zubanls/src/lib.rs b/crates/zubanls/src/lib.rs
-index 3c8ecac..593dc33 100644
+index 3c8ecac..2c97be8 100644
 --- a/crates/zubanls/src/lib.rs
 +++ b/crates/zubanls/src/lib.rs
-@@ -9,6 +9,8 @@ mod semantic_tokens;
+@@ -9,6 +9,7 @@ mod semantic_tokens;
  mod server;
  
  pub use crate::custom::{DisplayResult, DisplayStatusRequest};
-+#[cfg(target_family = "wasm")]
 +pub use crate::server::wasm::{ZubanLS, start};
  pub use crate::server::{
      GLOBAL_NOTIFY_EVENT_COUNTER, run_server, run_server_with_custom_connection,
  };
 diff --git a/crates/zubanls/src/server.rs b/crates/zubanls/src/server.rs
-index 48d5b90..f68fedf 100644
+index 48d5b90..f473d98 100644
 --- a/crates/zubanls/src/server.rs
 +++ b/crates/zubanls/src/server.rs
-@@ -25,6 +25,9 @@ use crate::notification_handlers::TestPanic;
+@@ -25,6 +25,8 @@ use crate::notification_handlers::TestPanic;
  use crate::request_handlers::to_uri;
  use crate::{Cli, custom, panic_hooks};
  
-+#[cfg(target_family = "wasm")]
 +pub(crate) mod wasm;
 +
  // Since we currently don't do garbage collection, we simply delete the project and reindex,
