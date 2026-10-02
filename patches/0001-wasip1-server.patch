@@ -1,24 +1,13 @@
-diff --git a/crates/zuban/src/bin/zuban.rs b/crates/zuban/src/bin/zuban.rs
-index 780e0ee..ee2f3ba 100644
---- a/crates/zuban/src/bin/zuban.rs
-+++ b/crates/zuban/src/bin/zuban.rs
-@@ -64,15 +64,5 @@ fn run_server(server_config: zubanls::Cli) -> anyhow::Result<()> {
- pub(crate) fn event_loop_thread(
-     func: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
- ) -> anyhow::Result<()> {
--    // Override OS defaults to avoid stack overflows on platforms with low stack size defaults.
--    const MAIN_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
--    const MAIN_THREAD_NAME: &str = "zubanls:main";
--    let handle = std::thread::Builder::new()
--        .name(MAIN_THREAD_NAME.into())
--        .stack_size(MAIN_THREAD_STACK_SIZE)
--        .spawn(func)?;
--
--    handle
--        .join()
--        .map_err(|e| anyhow::anyhow!("Error while joining the thread: {e:?}"))?
-+    func()
- }
+diff --git a/crates/zubanls/src/bin/zubanls.rs b/crates/zubanls/src/bin/zubanls.rs
+new file mode 100644
+index 0000000..1cbb59d
+--- /dev/null
++++ b/crates/zubanls/src/bin/zubanls.rs
+@@ -0,0 +1,4 @@
++fn main() -> anyhow::Result<()> {
++    logging_config::setup_logging(None)?;
++    zubanls::run_server(zubanls::Cli::default())
++}
 diff --git a/crates/zubanls/src/server.rs b/crates/zubanls/src/server.rs
 index 48d5b90..d4ee105 100644
 --- a/crates/zubanls/src/server.rs

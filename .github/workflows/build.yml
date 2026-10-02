@@ -48,7 +48,7 @@ jobs:
           path: |
             ${{ env.ROOT }}/zuban
             !${{ env.ROOT }}/zuban/target/wasm
-            !${{ env.ROOT }}/zuban/target/wasm32-wasip1/release/zuban.wasm
+            !${{ env.ROOT }}/zuban/target/wasm32-wasip1/release/zubanls.wasm
             ~/.cargo/registry
             ~/.cargo/git
           key: zuban-${{ inputs.zuban_rev }}-${{ hashFiles('scripts/setup.sh', 'patches/*.patch') }}

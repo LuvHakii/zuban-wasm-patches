@@ -18,8 +18,8 @@ export CARGO_PROFILE_RELEASE_DEBUG=false CARGO_PROFILE_RELEASE_STRIP=debuginfo C
   RUSTFLAGS="-C link-arg=-zstack-size=2097152"
 
 echo "building wasm"
-cargo build --release --target wasm32-wasip1 -p zuban --bin zuban
+cargo build --release --target wasm32-wasip1 -p zubanls --bin zubanls
 mkdir -p target/wasm
-wasm-opt -O --strip-debug target/wasm32-wasip1/release/zuban.wasm -o target/wasm/zuban.wasm
+wasm-opt -O --strip-debug target/wasm32-wasip1/release/zubanls.wasm -o target/wasm/zuban.wasm
 
 echo "BUILD DONE"

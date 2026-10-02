@@ -5,13 +5,13 @@ Builds the [zuban](https://github.com/zubanls/zuban) language server for `wasm32
 ## Layout
 
 ```
-patches/    net diff vs upstream/master: single-threaded zubanls server for wasm32-wasip1
+patches/    net diff vs upstream/master: single-threaded zubanls server binary for wasm32-wasip1
 scripts/    common.sh (config), setup.sh (clone), build.sh (patch + build)
 ```
 
 ## Run
 
-`zuban.wasm` is a WASI command: `zuban server`.
+`zuban.wasm` is a WASI command that runs the zubanls server; arguments are ignored.
 
 - JSON-RPC on stdin/stdout, one compact JSON message per line, no `Content-Length`.
 - Files come from the WASI preopens. Set `ZUBAN_TYPESHED=/typeshed`.
