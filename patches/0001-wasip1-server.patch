@@ -1,3 +1,35 @@
+diff --git a/crates/vfs/src/local_fs.rs b/crates/vfs/src/local_fs.rs
+index 65ea179..fc9856c 100644
+--- a/crates/vfs/src/local_fs.rs
++++ b/crates/vfs/src/local_fs.rs
+@@ -4,7 +4,7 @@ use std::{
+ };
+ 
+ use crossbeam_channel::{Receiver, unbounded};
+-use notify::{RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
++use notify::{NullWatcher as RecommendedWatcher, RecursiveMode, Watcher};
+ use utils::{FastHashMap, FastHashSet};
+ 
+ use crate::{
+@@ -213,7 +213,8 @@ impl SimpleLocalFS {
+ impl<T: Fn(PathWithScheme) + Sync + Send> LocalFS<T> {
+     pub fn with_watcher(on_invalidated_memory_file: T) -> Self {
+         let (watcher_sender, watcher_receiver) = unbounded();
+-        let watcher = log_notify_error(recommended_watcher(move |event| {
++        std::mem::forget(watcher_sender.clone());
++        let watcher = log_notify_error(RecommendedWatcher::new(move |event| {
+             // we don't care about the error. If sending fails that usually
+             // means we were dropped, so unwrapping will just add to the
+             // panic noise.
+@@ -221,7 +222,7 @@ impl<T: Fn(PathWithScheme) + Sync + Send> LocalFS<T> {
+             if let Err(err) = watcher_sender.send(event) {
+                 tracing::warn!("Watch sender error: {err} (might be fine if terminating)")
+             }
+-        }));
++        }, notify::Config::default()));
+         Self {
+             watcher: watcher.map(|w| (RwLock::new(w), watcher_receiver)),
+             already_watched_dirs: Default::default(),
 diff --git a/crates/zubanls/src/bin/zubanls.rs b/crates/zubanls/src/bin/zubanls.rs
 new file mode 100644
 index 0000000..1cbb59d
@@ -9,7 +41,7 @@ index 0000000..1cbb59d
 +    zubanls::run_server(zubanls::Cli::default())
 +}
 diff --git a/crates/zubanls/src/server.rs b/crates/zubanls/src/server.rs
-index 48d5b90..d4ee105 100644
+index 48d5b90..0afed62 100644
 --- a/crates/zubanls/src/server.rs
 +++ b/crates/zubanls/src/server.rs
 @@ -122,12 +122,11 @@ pub fn run_server_with_custom_connection(
@@ -80,26 +112,7 @@ index 48d5b90..d4ee105 100644
  
              select! {
                  recv(receiver) -> msg => {
-@@ -295,17 +320,7 @@ impl<'sender> GlobalState<'sender> {
-         if let Some(p) = project {
-             p
-         } else {
--            let new_changed_files = self.changed_in_memory_files.clone();
--            let should_push = self.client_capabilities.should_push_diagnostics();
--            let vfs_handler = LocalFS::with_watcher(move |path| {
--                if should_push {
--                    let mut changed_files = new_changed_files.as_ref().write().unwrap();
--                    // This is currently a not a set, because the order matters
--                    if !changed_files.contains(&path) {
--                        changed_files.push(path)
--                    }
--                }
--            });
-+            let vfs_handler = LocalFS::without_watcher();
-             let first_root = self
-                 .roots
-                 .first()
-@@ -444,7 +459,7 @@ impl<'sender> GlobalState<'sender> {
+@@ -444,7 +469,7 @@ impl<'sender> GlobalState<'sender> {
          .on_sync_mut::<DidChangeNotebookDocument>(GlobalState::handle_did_change_notebook)
          .on_sync_mut::<DidCloseNotebookDocument>(GlobalState::handle_did_close_notebook)
          //.on_sync_mut::<DidChangeWorkspaceFolders>(GlobalState::handle_did_change_workspace_folders)
@@ -108,7 +121,7 @@ index 48d5b90..d4ee105 100644
          .on_sync_mut::<TestPanic>(GlobalState::test_panic)
          .finish();
      }
-@@ -545,6 +560,19 @@ impl<'sender> GlobalState<'sender> {
+@@ -545,6 +570,19 @@ impl<'sender> GlobalState<'sender> {
          }
      }
  
