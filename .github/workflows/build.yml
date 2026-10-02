@@ -59,11 +59,15 @@ jobs:
       - name: build
         run: bash scripts/build.sh
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: smoke
         run: |
           source scripts/common.sh
           git -C $SRC submodule update --init --depth 1 third_party/typeshed
-          node scripts/smoke.mjs $SRC/target/wasm/zuban.wasm $SRC/third_party/typeshed
+          node scripts/smoke.ts $SRC/target/wasm/zuban.wasm $SRC/third_party/typeshed
 
       - name: stage release
         run: |
