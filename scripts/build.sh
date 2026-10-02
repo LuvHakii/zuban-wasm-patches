@@ -7,7 +7,9 @@ cd $SRC
 
 if [ ! -f .patched ]; then
   echo "applying patches"
-  git apply $REPO/patches/*.patch
+  out=$(git apply -v $REPO/patches/*.patch 2>&1) || { echo "$out"; exit 1; }
+  echo "$out"
+  if grep -q offset <<<"$out"; then echo "hunk applied at an offset, regenerate that patch"; exit 1; fi
   touch .patched
 fi
 
