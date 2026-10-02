@@ -3,10 +3,6 @@ name: build
 on:
   workflow_dispatch:
     inputs:
-      zuban_rev:
-        description: "zubanls/zuban tag/branch/commit to build against"
-        type: string
-        default: master
       release:
         description: "Publish release <yyyymmdd-hhmm> UTC. Off = dry run, artifact only, 7 days."
         type: boolean
@@ -19,15 +15,21 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  ROOT: /home/runner/zuban-build
-  ZUBAN_REV: ${{ inputs.zuban_rev }}
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: pin
+        id: pin
+        run: |
+          SHA=$(git rev-parse HEAD:zuban)
+          TAG=$(git ls-remote --tags https://github.com/zubanls/zuban.git | grep "^$SHA" | cut -f2 | sed 's|refs/tags/||; s|\^{}$||' | tail -1 || true)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "rev=${TAG:-$SHA}" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -42,19 +44,16 @@ jobs:
             | tar xz -C /tmp
           echo "/tmp/binaryen-version_${BINARYEN_VER}/bin" >> "$GITHUB_PATH"
 
-      - name: cache source + cargo
+      - name: cache cargo
         uses: actions/cache@v4
         with:
           path: |
-            ${{ env.ROOT }}/zuban
-            !${{ env.ROOT }}/zuban/target/wasm
-            !${{ env.ROOT }}/zuban/target/wasm32-wasip1/release/zubanls.wasm
+            zuban/target
+            !zuban/target/wasm
+            !zuban/target/wasm32-wasip1/release/zubanls.wasm
             ~/.cargo/registry
             ~/.cargo/git
-          key: zuban-${{ inputs.zuban_rev }}-${{ hashFiles('scripts/setup.sh', 'patches/*.patch') }}
-
-      - name: setup
-        run: bash scripts/setup.sh
+          key: zuban-${{ steps.pin.outputs.sha }}-${{ hashFiles('patches/*.patch') }}
 
       - name: build
         run: bash scripts/build.sh
@@ -65,22 +64,17 @@ jobs:
 
       - name: smoke
         run: |
-          source scripts/common.sh
-          git -C $SRC submodule update --init --depth 1 third_party/typeshed
-          node scripts/smoke.ts $SRC/target/wasm/zuban.wasm $SRC/third_party/typeshed
+          git -C zuban submodule update --init --depth 1 third_party/typeshed
+          node scripts/smoke.ts zuban/target/wasm/zuban.wasm zuban/third_party/typeshed
 
       - name: stage release
         run: |
-          source scripts/common.sh
           mkdir -p release
-          cp $ROOT/zuban/target/wasm/* release/
-          ZUBAN_COMMIT=$(git -C $ROOT/zuban rev-parse HEAD)
-          PATCHES=$(basename -a $REPO/patches/*.patch | jq -R . | jq -s .)
+          cp zuban/target/wasm/* release/
+          PATCHES=$(basename -a patches/*.patch | jq -R . | jq -s .)
           printf '{"zubanRev":"%s","zubanBaseCommit":"%s","patches":%s}' \
-            "$ZUBAN_REV" "$ZUBAN_COMMIT" "$PATCHES" > release/versions.json
-          echo "zuban_commit=$ZUBAN_COMMIT" >> "$GITHUB_OUTPUT"
+            "${{ steps.pin.outputs.rev }}" "${{ steps.pin.outputs.sha }}" "$PATCHES" > release/versions.json
           ls -la release/
-        id: v
 
       - name: upload dry run
         if: '!inputs.release'
@@ -98,7 +92,7 @@ jobs:
           NOW=$(date -u +%s)
           TAG=$(date -u -d "@$NOW" +%Y%m%d-%H%M)
           NOTES=$(printf 'Zuban: %s (%s)\nPatch: zubanls server on wasm32-wasip1, newline-delimited JSON stdio\n%s\n' \
-            "$ZUBAN_REV" "${{ steps.v.outputs.zuban_commit }}" "$(date -u -d "@$NOW" +%FT%TZ)")
+            "${{ steps.pin.outputs.rev }}" "${{ steps.pin.outputs.sha }}" "$(date -u -d "@$NOW" +%FT%TZ)")
           gh release create "$TAG" release/* \
             --target "$GITHUB_SHA" \
             --title "$TAG" \

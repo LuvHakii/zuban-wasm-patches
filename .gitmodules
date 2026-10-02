@@ -1,0 +1,4 @@
+[submodule "zuban"]
+	path = zuban
+	url = https://github.com/zubanls/zuban.git
+	shallow = true

@@ -5,8 +5,9 @@ Builds the [zuban](https://github.com/zubanls/zuban) language server for `wasm32
 ## Layout
 
 ```
-patches/    net diff vs upstream/master: single-threaded zubanls server binary for wasm32-wasip1
-scripts/    common.sh (config), setup.sh (clone), build.sh (patch + build)
+zuban/      upstream, pinned submodule
+patches/    net diff vs the pinned commit: single-threaded zubanls server binary for wasm32-wasip1
+scripts/    build.sh (patch + build), smoke.ts
 ```
 
 ## Run
@@ -21,6 +22,5 @@ scripts/    common.sh (config), setup.sh (clone), build.sh (patch + build)
 ## Build
 
 ```bash
-ZUBAN_REV=master bash scripts/setup.sh
-bash scripts/build.sh
+bash scripts/build.sh   # inits the submodule, applies patches, builds zuban/target/wasm/zuban.wasm
 ```
