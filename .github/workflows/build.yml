@@ -47,6 +47,8 @@ jobs:
         with:
           path: |
             ${{ env.ROOT }}/zuban
+            !${{ env.ROOT }}/zuban/target/wasm
+            !${{ env.ROOT }}/zuban/target/wasm32-wasip1/release/zuban.wasm
             ~/.cargo/registry
             ~/.cargo/git
           key: zuban-${{ inputs.zuban_rev }}-${{ hashFiles('scripts/setup.sh', 'patches/*.patch') }}
@@ -56,6 +58,12 @@ jobs:
 
       - name: build
         run: bash scripts/build.sh
+
+      - name: smoke
+        run: |
+          source scripts/common.sh
+          git -C $SRC submodule update --init --depth 1 third_party/typeshed
+          node scripts/smoke.mjs $SRC/target/wasm/zuban.wasm $SRC/third_party/typeshed
 
       - name: stage release
         run: |
