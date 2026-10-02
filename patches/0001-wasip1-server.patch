@@ -41,7 +41,7 @@ index 0000000..1cbb59d
 +    zubanls::run_server(zubanls::Cli::default())
 +}
 diff --git a/crates/zubanls/src/server.rs b/crates/zubanls/src/server.rs
-index 48d5b90..0afed62 100644
+index 48d5b90..af199e7 100644
 --- a/crates/zubanls/src/server.rs
 +++ b/crates/zubanls/src/server.rs
 @@ -122,12 +122,11 @@ pub fn run_server_with_custom_connection(
@@ -121,7 +121,7 @@ index 48d5b90..0afed62 100644
          .on_sync_mut::<TestPanic>(GlobalState::test_panic)
          .finish();
      }
-@@ -545,6 +570,19 @@ impl<'sender> GlobalState<'sender> {
+@@ -545,6 +570,18 @@ impl<'sender> GlobalState<'sender> {
          }
      }
  
@@ -129,12 +129,11 @@ index 48d5b90..0afed62 100644
 +        &mut self,
 +        params: lsp_types::DidChangeWatchedFilesParams,
 +    ) -> anyhow::Result<()> {
++        let mut event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any));
 +        for change in params.changes {
-+            let path = patch_path_prefix(&change.uri)?;
-+            let project = self.project();
-+            let path = project.vfs_handler().unchecked_abs_path(&path);
-+            project.invalidate_path(&path);
++            event = event.add_path(patch_path_prefix(&change.uri)?.into());
 +        }
++        self.on_notify_event(Ok(event));
 +        Ok(())
 +    }
 +
