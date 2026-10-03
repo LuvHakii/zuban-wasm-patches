@@ -31,8 +31,10 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "rev=${TAG:-$SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Install wasm target
-        run: rustup target add wasm32-wasip1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: wasm32-wasip1
+          cache-workspaces: zuban
 
       - name: Install wasm-opt
         env:
@@ -41,17 +43,6 @@ jobs:
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VER}/binaryen-version_${BINARYEN_VER}-x86_64-linux.tar.gz" \
             | tar xz -C /tmp
           echo "/tmp/binaryen-version_${BINARYEN_VER}/bin" >> "$GITHUB_PATH"
-
-      - name: cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            zuban/target
-            !zuban/target/wasm
-            !zuban/target/wasm32-wasip1/release/zubanls.wasm
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: zuban-${{ steps.pin.outputs.sha }}-${{ hashFiles('patches/*', 'overlay/**', 'scripts/apply-rules.sh') }}
 
       - name: build
         run: bash scripts/build.sh
