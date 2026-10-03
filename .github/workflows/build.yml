@@ -53,7 +53,7 @@ jobs:
             !zuban/target/wasm32-wasip1/release/zubanls.wasm
             ~/.cargo/registry
             ~/.cargo/git
-          key: zuban-${{ steps.pin.outputs.sha }}-${{ hashFiles('patches/*.patch') }}
+          key: zuban-${{ steps.pin.outputs.sha }}-${{ hashFiles('patches/*', 'overlay/**', 'scripts/apply-rules.sh') }}
 
       - name: build
         run: bash scripts/build.sh
@@ -71,7 +71,7 @@ jobs:
         run: |
           mkdir -p release
           cp zuban/target/wasm/* release/
-          PATCHES=$(basename -a patches/*.patch | jq -R . | jq -s .)
+          PATCHES=$(basename -a patches/* | jq -R . | jq -s .)
           printf '{"zubanRev":"%s","zubanBaseCommit":"%s","patches":%s}' \
             "${{ steps.pin.outputs.rev }}" "${{ steps.pin.outputs.sha }}" "$PATCHES" > release/versions.json
           ls -la release/

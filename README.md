@@ -6,8 +6,9 @@ Builds the [zuban](https://github.com/zubanls/zuban) language server for `wasm32
 
 ```
 zuban/      upstream, pinned submodule
-patches/    net diff vs the pinned commit: single-threaded zubanls server binary for wasm32-wasip1
-scripts/    build.sh (patch + build), smoke.ts
+patches/    ast-grep rules (each with an expected match count): single-threaded zubanls server for wasm32-wasip1
+overlay/    new files copied over the source (the server-only bin)
+scripts/    build.sh (rules + overlay + build), apply-rules.sh, smoke.ts
 ```
 
 ## Run
@@ -22,5 +23,5 @@ scripts/    build.sh (patch + build), smoke.ts
 ## Build
 
 ```bash
-bash scripts/build.sh   # inits the submodule, applies patches, builds zuban/target/wasm/zuban.wasm
+bash scripts/build.sh   # inits the submodule, applies rules + overlay, builds zuban/target/wasm/zuban.wasm
 ```

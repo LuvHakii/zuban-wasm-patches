@@ -1,0 +1,135 @@
+id: notify-null-watcher
+language: rust
+files: [crates/vfs/src/local_fs.rs]
+metadata: { expect: 1 }
+rule:
+  pattern: use notify::{RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
+fix: use notify::{NullWatcher as RecommendedWatcher, RecursiveMode, Watcher};
+---
+id: null-watcher-new
+language: rust
+files: [crates/vfs/src/local_fs.rs]
+metadata: { expect: 1 }
+rule:
+  pattern: let watcher = log_notify_error(recommended_watcher($CB));
+  inside: { kind: function_item, stopBy: end, has: { field: name, regex: ^with_watcher$ } }
+fix: |-
+  std::mem::forget(watcher_sender.clone());
+  let watcher = log_notify_error(RecommendedWatcher::new($CB, notify::Config::default()));
+---
+id: initialize-finish-flush
+language: rust
+files: [crates/zubanls/src/server.rs]
+metadata: { expect: 1 }
+rule:
+  pattern: if let Err(e) = connection.initialize_finish($ID, $RES) { $$$ }
+  inside: { kind: function_item, stopBy: end, has: { field: name, regex: ^run_server_with_custom_connection$ } }
+fix: |-
+  connection
+      .sender
+      .send(lsp_server::Response::new_ok($ID, $RES).into())?;
+  pump()?;
+  connection.receiver.recv()?;
+---
+id: run-server-stdio-pump
+language: rust
+files: [crates/zubanls/src/server.rs]
+metadata: { expect: 1 }
+rule:
+  kind: function_item
+  pattern: $F
+  has: { field: name, regex: ^run_server$ }
+rewriters:
+- id: memory-conn
+  rule: { pattern: 'let (connection, _io_threads) = Connection::stdio();' }
+  fix: |-
+    let (connection, client) = Connection::memory();
+    STDIO.set(Some(client));
+    pump()?;
+- id: flush-cleanup
+  rule: { pattern: 'run_server_with_custom_connection(cli_options, connection, None, $CLEANUP)' }
+  fix: run_server_with_custom_connection(cli_options, connection, None, flush)
+transform:
+  NEW: { rewrite: { source: $F, rewriters: [memory-conn, flush-cleanup] } }
+fix: |-
+  $NEW
+
+  thread_local!(static STDIO: RefCell<Option<Connection>> = const { RefCell::new(None) });
+
+  fn flush() -> anyhow::Result<()> {
+      use std::io::Write as _;
+      STDIO.with_borrow(|client| {
+          let mut out = std::io::stdout().lock();
+          for msg in client.iter().flat_map(|c| c.receiver.try_iter()) {
+              serde_json::to_writer(&mut out, &msg)?;
+              out.write_all(b"\n")?;
+          }
+          Ok(out.flush()?)
+      })
+  }
+
+  fn pump() -> anyhow::Result<()> {
+      flush()?;
+      STDIO.with_borrow(|client| {
+          let Some(client) = client else { return Ok(()) };
+          let mut line = String::new();
+          let msg = match std::io::stdin().read_line(&mut line)? {
+              0 => Message::Notification(lsp_server::Notification::new("exit".into(), ())),
+              _ => serde_json::from_str(&line)?,
+          };
+          Ok(client.sender.send(msg)?)
+      })
+  }
+---
+id: memory-conn-count
+language: rust
+files: [crates/zubanls/src/server.rs]
+metadata: { expect: 1 }
+rule: { pattern: 'let (connection, _io_threads) = Connection::stdio();', inside: { kind: function_item, stopBy: end, has: { field: name, regex: ^run_server$ } } }
+---
+id: flush-cleanup-count
+language: rust
+files: [crates/zubanls/src/server.rs]
+metadata: { expect: 1 }
+rule: { pattern: 'run_server_with_custom_connection(cli_options, connection, None, $CLEANUP)', inside: { kind: function_item, stopBy: end, has: { field: name, regex: ^run_server$ } } }
+---
+id: event-loop-pump
+language: rust
+files: [crates/zubanls/src/server.rs]
+metadata: { expect: 1 }
+rule:
+  pattern: self.project();
+  inside: { kind: function_item, stopBy: end, has: { field: name, regex: ^event_loop$ } }
+fix: |-
+  self.project();
+  pump()?;
+---
+id: watched-files-handler-on
+language: rust
+files: [crates/zubanls/src/server.rs]
+metadata: { expect: 1 }
+rule:
+  kind: line_comment
+  regex: ^//\.on_sync_mut::<notifs::DidChangeWatchedFiles>
+  inside: { kind: function_item, stopBy: end, has: { field: name, regex: ^on_notification$ } }
+fix: .on_sync_mut::<lsp_types::notification::DidChangeWatchedFiles>(GlobalState::handle_did_change_watched_files)
+---
+id: watched-files-handler
+language: rust
+files: [crates/zubanls/src/server.rs]
+metadata: { expect: 1 }
+rule: { kind: function_item, pattern: $F, has: { field: name, regex: ^on_notify_events$ } }
+fix: |-
+  fn handle_did_change_watched_files(
+      &mut self,
+      params: lsp_types::DidChangeWatchedFilesParams,
+  ) -> anyhow::Result<()> {
+      let mut event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any));
+      for change in params.changes {
+          event = event.add_path(patch_path_prefix(&change.uri)?.into());
+      }
+      self.on_notify_event(Ok(event));
+      Ok(())
+  }
+
+  $F
