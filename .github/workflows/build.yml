@@ -58,10 +58,6 @@ jobs:
       - name: build
         run: bash scripts/build.sh
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
       - name: smoke
         run: |
           git -C zuban submodule update --init --depth 1 third_party/typeshed
