@@ -25,3 +25,7 @@ scripts/    build.sh (rules + overlay + build), apply-rules.sh, smoke.ts
 ```bash
 bash scripts/build.sh   # inits the submodule, applies rules + overlay, builds zuban/target/wasm/zuban.wasm
 ```
+
+## License
+
+The patches, overlay and the built `zuban.wasm` are modifications of zuban and are licensed under the GNU Affero General Public License v3.0 only (see `LICENSE`). Zuban is also available under a commercial license from its authors. Each release is built from this repository at its tag with `zuban/` pinned to the commit named in the release notes, which is the Corresponding Source for that binary.
