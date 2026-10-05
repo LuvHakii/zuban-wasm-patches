@@ -104,6 +104,19 @@ fix: |-
   self.project();
   pump()?;
 ---
+id: which-split-path
+language: rust
+files: [crates/zuban_python/src/sys_path.rs]
+metadata: { expect: 1 }
+rule: { pattern: 'which::which(executable_name)' }
+fix: |-
+  std::env::var("PATH")
+      .unwrap_or_default()
+      .split(':')
+      .map(|dir| Path::new(dir).join(executable_name))
+      .find(|path| path.is_file())
+      .ok_or(which::Error::CannotFindBinaryPath)
+---
 id: watched-files-handler-on
 language: rust
 files: [crates/zubanls/src/server.rs]
